@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Lock down collections containing sensitive passcodes, PII, or configurations
+    match /teacherPasscodes/{document} {
+      allow read, write: if false;
+    }
+    match /teachers/{document} {
+      allow read, write: if false;
+    }
+    match /drives/{document} {
+      allow read, write: if false;
+    }
+
+    // Allow direct client access to students and attendance list
+    match /students/{document} {
+      allow read, write: if true;
+    }
+    match /attendance/{document} {
+      allow read, write: if true;
+    }
+  }
+}
