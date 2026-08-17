@@ -88,6 +88,9 @@ function AdminConsoleComponent() {
   const [isRMLoginModalOpen, setIsRMLoginModalOpen] = useState(false);
   const [rmLoginCreds, setRMLoginCreds] = useState({ email: '', password: '' });
   const [rmAccessToken, setRMAccessTokenState] = useState('');
+  
+  const [globalRoster, setGlobalRoster] = useState([]);
+  const [dutyRequired, setDutyRequired] = useState('');
 
   const handleDashboardFullscreenToggle = () => {
     setIsDashboardFullScreen((prev) => !prev);
@@ -129,10 +132,12 @@ function AdminConsoleComponent() {
     };
     checkTwilioEnv();
 
+    const savedRoster = JSON.parse(localStorage.getItem('exam_attendance_roster') || '[]');
+    setGlobalRoster(savedRoster);
+
     const savedActiveDriveId = sessionStorage.getItem('adminActiveDriveId') || '';
     setActiveDriveId(savedActiveDriveId);
   }, [router]);
-
 
   useEffect(() => {
     document.body.style.overflow = isDashboardFullScreen ? 'hidden' : '';
@@ -329,9 +334,20 @@ function AdminConsoleComponent() {
     const company = companyName.trim();
     const date = driveDate;
 
-    if (!company || !date || !studentCSVFile || !teacherCSVFile) {
-      setSetupAlert({ type: 'error', msg: 'Company name, Date, and both Excel files are required.' });
+    if (!company || !date || !studentCSVFile) {
+      setSetupAlert({ type: 'error', msg: 'Company name, Date, and Student Excel are required.' });
       return;
+    }
+    
+    if (!teacherCSVFile && parsedUploadedTeachers.length === 0) {
+      if (!dutyRequired || parseInt(dutyRequired, 10) <= 0) {
+        setSetupAlert({ type: 'error', msg: 'Please either upload a Teacher Excel or specify the Required Teachers to pull from the Global Roster.' });
+        return;
+      }
+      if (globalRoster.length < parseInt(dutyRequired, 10)) {
+        setSetupAlert({ type: 'error', msg: `Not enough teachers in the Global Roster. Needed: ${dutyRequired}, Available: ${globalRoster.length}` });
+        return;
+      }
     }
 
     try {
@@ -357,17 +373,32 @@ function AdminConsoleComponent() {
 
 
       let currentTeachers = parsedUploadedTeachers;
-      if (currentTeachers.length === 0) {
+      let usedFromRoster = false;
+
+      if (currentTeachers.length === 0 && teacherCSVFile) {
         const teacherRows = await parseExcelFile(teacherCSVFile);
         const parsed = parseTeacherExcel(teacherRows);
         currentTeachers = parsed.map((t, idx) => {
           const assignedHall = hallsConfig[idx % hallsConfig.length]?.name || 'Hall 1';
           return { ...t, assignedHall };
         });
+        
+        if (dutyRequired && parseInt(dutyRequired, 10) > 0) {
+          currentTeachers = currentTeachers.slice(0, parseInt(dutyRequired, 10));
+        }
+      } else if (currentTeachers.length === 0 && !teacherCSVFile && dutyRequired && parseInt(dutyRequired, 10) > 0) {
+        // Pull from global roster
+        const needed = parseInt(dutyRequired, 10);
+        const pulled = globalRoster.slice(0, needed);
+        currentTeachers = pulled.map((t, idx) => {
+          const assignedHall = hallsConfig[idx % hallsConfig.length]?.name || 'Hall 1';
+          return { ...t, assignedHall };
+        });
+        usedFromRoster = true;
       }
 
       if (currentTeachers.length === 0) {
-        throw new Error("Teacher Excel contains no valid rows.");
+        throw new Error("No teachers available. Please upload a file or use the Global Roster.");
       }
 
       const companySlug = company.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
@@ -427,6 +458,13 @@ function AdminConsoleComponent() {
       await saveDriveAction(driveId, driveData);
       console.log("DEBUG: saveDriveAction server action succeeded.");
 
+      if (usedFromRoster) {
+        const needed = parseInt(dutyRequired, 10);
+        const newRoster = [...globalRoster.slice(needed), ...globalRoster.slice(0, needed)];
+        setGlobalRoster(newRoster);
+        localStorage.setItem('exam_attendance_roster', JSON.stringify(newRoster));
+      }
+
       setSetupAlert({ type: 'success', msg: `Drive "${company}" successfully created and active!` });
 
       setCompanyName('');
@@ -436,6 +474,7 @@ function AdminConsoleComponent() {
       setTeacherCSVFile(null);
       setTeacherCSVFileName('Choose Teacher Excel');
       setParsedUploadedTeachers([]);
+      setDutyRequired('');
       setHallsConfig([{ name: 'Hall 1', capacity: '' }]);
 
       loadDrive(driveId);
@@ -480,6 +519,7 @@ function AdminConsoleComponent() {
     setTeacherCSVFile(null);
     setTeacherCSVFileName('Choose Teacher Excel');
     setParsedUploadedTeachers([]);
+    setDutyRequired('');
     setSetupAlert({ type: '', msg: '' });
   };
 
@@ -547,9 +587,13 @@ function AdminConsoleComponent() {
       }
 
 
-      if (teacherCSVFile || parsedUploadedTeachers.length > 0) {
+      let usedFromRoster = false;
+      let shouldUpdateTeachers = teacherCSVFile || parsedUploadedTeachers.length > 0 || (dutyRequired && parseInt(dutyRequired, 10) > 0 && !teacherCSVFile && parsedUploadedTeachers.length === 0);
+
+      if (shouldUpdateTeachers) {
         setSetupAlert({ type: 'warning', msg: 'Allocating and updating teacher accounts...' });
         let currentTeachers = parsedUploadedTeachers;
+
         if (currentTeachers.length === 0 && teacherCSVFile) {
           const teacherRows = await parseExcelFile(teacherCSVFile);
           const parsed = parseTeacherExcel(teacherRows);
@@ -557,10 +601,25 @@ function AdminConsoleComponent() {
             const assignedHall = hallsConfig[idx % hallsConfig.length]?.name || 'Hall 1';
             return { ...t, assignedHall };
           });
+          
+          if (dutyRequired && parseInt(dutyRequired, 10) > 0) {
+            currentTeachers = currentTeachers.slice(0, parseInt(dutyRequired, 10));
+          }
+        } else if (currentTeachers.length === 0 && !teacherCSVFile && dutyRequired && parseInt(dutyRequired, 10) > 0) {
+          const needed = parseInt(dutyRequired, 10);
+          if (globalRoster.length < needed) {
+             throw new Error(`Not enough teachers in the Global Roster. Needed: ${needed}, Available: ${globalRoster.length}`);
+          }
+          const pulled = globalRoster.slice(0, needed);
+          currentTeachers = pulled.map((t, idx) => {
+            const assignedHall = hallsConfig[idx % hallsConfig.length]?.name || 'Hall 1';
+            return { ...t, assignedHall };
+          });
+          usedFromRoster = true;
         }
 
         if (currentTeachers.length === 0) {
-          throw new Error("Teacher Excel contains no valid rows.");
+          throw new Error("No teachers available. Please upload a file or use the Global Roster.");
         }
 
         const assignedTeacherIds = [];
@@ -582,6 +641,13 @@ function AdminConsoleComponent() {
           });
         });
         await saveTeachersAndPasscodesAction(teachersListToSave, editingDriveId);
+
+        if (usedFromRoster) {
+          const needed = parseInt(dutyRequired, 10);
+          const newRoster = [...globalRoster.slice(needed), ...globalRoster.slice(0, needed)];
+          setGlobalRoster(newRoster);
+          localStorage.setItem('exam_attendance_roster', JSON.stringify(newRoster));
+        }
 
         updatedDriveData.assignedTeachers = assignedTeacherIds;
       }
@@ -1347,10 +1413,112 @@ Delhi Technological University`;
           </svg>
           Live Dashboard
         </button>
+        <button
+          onClick={() => setActiveTab('roster-tab')}
+          className={`tab-btn ${activeTab === 'roster-tab' ? 'active' : ''}`}
+          style={{
+            borderBottom: activeTab === 'roster-tab' ? '2px solid #FF474C' : '2px solid transparent',
+            color: activeTab === 'roster-tab' ? '#FF474C' : undefined
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+          Teacher Roster
+        </button>
       </nav>
 
       <main>
+        {activeTab === 'roster-tab' && (
+          <section id="roster-tab" className="tab-content active">
+            <div className="panel" style={{ maxWidth: '800px', margin: '0 auto' }}>
+              <div className="panel-title">Global Teacher Roster</div>
+              <div style={{ marginBottom: '1rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                Upload a main list of teachers here. When you create a drive without uploading a specific teacher file, the required number of invigilators will be automatically drawn from the top of this list, and then moved to the bottom (rotated).
+              </div>
+              
+              <div className="form-group">
+                <label>Upload Full Teacher List</label>
+                <div className="file-upload-wrapper">
+                  <div className="file-upload-label">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+                    </svg>
+                    <span>Choose Teacher Excel</span>
+                  </div>
+                  <input
+                    type="file"
+                    className="file-upload-input"
+                    accept=".xlsx, .xls"
+                    onChange={async (e) => {
+                      const file = e.target.files[0];
+                      if (!file) return;
+                      try {
+                        const rows = await parseExcelFile(file);
+                        const parsed = parseTeacherExcel(rows);
+                        if (parsed.length === 0) throw new Error("No valid rows found.");
+                        
+                        setGlobalRoster(parsed);
+                        localStorage.setItem('exam_attendance_roster', JSON.stringify(parsed));
+                        alert(`Successfully uploaded ${parsed.length} teachers to the Global Roster!`);
+                      } catch (err) {
+                        alert(`Error uploading roster: ${err.message}`);
+                      }
+                      e.target.value = null;
+                    }}
+                  />
+                </div>
+              </div>
 
+              {globalRoster.length > 0 && (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '1.5rem 0 0.5rem 0' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      Current Queue ({globalRoster.length} Teachers)
+                    </div>
+                    <button 
+                      className="btn btn-secondary" 
+                      style={{ fontSize: '0.75rem', padding: '0.25rem 0.75rem', height: 'auto' }}
+                      onClick={() => {
+                        if (confirm("Are you sure you want to clear the Global Roster?")) {
+                          setGlobalRoster([]);
+                          localStorage.removeItem('exam_attendance_roster');
+                        }
+                      }}
+                    >
+                      Clear Roster
+                    </button>
+                  </div>
+                  <div className="table-container" style={{ maxHeight: '400px', marginTop: 0 }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Name</th>
+                          <th>Phone</th>
+                          <th>Email</th>
+                        </tr>
+                      </thead>
+                        <tbody>
+                        {globalRoster.map((t, idx) => (
+                          <tr key={idx}>
+                            <td style={{ color: 'var(--text-muted)', width: '40px' }}>{idx + 1}</td>
+                            <td style={{ fontWeight: 600, color: 'white' }}>{t.name}</td>
+                            <td>{t.phone}</td>
+                            <td style={{ color: 'var(--text-muted)' }}>{t.email || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+        )}
 
         {activeTab === 'setup-tab' && (
           <section id="setup-tab" className="tab-content active">
@@ -1475,31 +1643,52 @@ Delhi Technological University`;
                     </div>
                   </div>
 
-                  <div className="form-group">
-                    <label>Teachers Excel File Upload</label>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                      Excel Columns: <code>Name, Phone, Email</code>
-                    </div>
-                    <div className="file-upload-wrapper">
-                      <div className="file-upload-label">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
-                        </svg>
-                        <span>{teacherCSVFileName}</span>
+                  <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
+                    {/* <div className="form-group" style={{ flex: 2, marginBottom: 0 }}>
+                      <label>Teachers Excel File Upload</label>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                        Excel Columns: <code>Name, Phone, Email</code>
+                      </div>
+                      <div className="file-upload-wrapper">
+                        <div className="file-upload-label">
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+                          </svg>
+                          <span>{teacherCSVFileName}</span>
+                        </div>
+                        <input
+                          type="file"
+                          className="file-upload-input"
+                          accept=".xlsx, .xls"
+                          required={false}
+                          onChange={handleTeacherFileSelected}
+                        />
+                      </div>
+                    </div> */}
+
+                    <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                      <label>Required Teachers</label>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                        Number of teachers needed
                       </div>
                       <input
-                        type="file"
-                        className="file-upload-input"
-                        accept=".xlsx, .xls"
-                        required={!isEditMode}
-                        onChange={handleTeacherFileSelected}
+                        type="number"
+                        className="form-control"
+                        placeholder="E.g., 5"
+                        value={dutyRequired}
+                        onChange={(e) => setDutyRequired(e.target.value)}
+                        min="1"
+                        style={{ height: '42px' }}
                       />
                     </div>
+                  </div>
 
 
-                    {parsedUploadedTeachers.length > 0 && (
+                    {(parsedUploadedTeachers.length > 0 || (!teacherCSVFile && dutyRequired && parseInt(dutyRequired, 10) > 0 && globalRoster.length > 0)) && (
                       <div id="uploaded-teachers-panel" style={{ marginTop: '1rem', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem', backgroundColor: 'rgba(30, 41, 59, 0.3)' }}>
-                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.5rem' }}>Uploaded Invigilators Allocation</div>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.5rem' }}>
+                          {parsedUploadedTeachers.length > 0 ? 'Uploaded Invigilators Allocation' : 'Global Roster Auto-Allocation Preview'}
+                        </div>
                         <div className="table-container" style={{ maxHeight: '250px', marginTop: 0 }}>
                           <table>
                             <thead>
@@ -1511,50 +1700,59 @@ Delhi Technological University`;
                               </tr>
                             </thead>
                             <tbody>
-                              {parsedUploadedTeachers.map((t, idx) => (
-                                <tr key={idx}>
-                                  <td style={{ fontWeight: 600, color: 'white' }}>{t.name}</td>
-                                  <td style={{ fontSize: '0.85rem' }}>{t.phone}</td>
-                                  <td style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>{t.email || '—'}</td>
-                                  <td>
-                                    <select
-                                      className="form-control"
-                                      style={{
-                                        padding: '0.25rem 1.75rem 0.25rem 0.5rem',
-                                        height: 'auto',
-                                        minHeight: 'auto',
-                                        fontSize: '0.85rem',
-                                        width: '100%',
-                                        minWidth: '125px',
-                                        boxSizing: 'border-box',
-                                        color: 'var(--text-main)',
-                                        backgroundColor: 'var(--bg-color)',
-                                      }}
-                                      value={t.assignedHall}
-                                      onChange={(e) => handleTeacherPreviewHallChange(idx, e.target.value)}
-                                    >
-                                      {hallsConfig.map(h => (
-                                        <option
-                                          key={h.name}
-                                          value={h.name}
-                                          style={{
-                                            backgroundColor: 'var(--panel-bg)',
-                                            color: 'var(--text-main)',
-                                          }}
-                                        >
-                                          {h.name}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </td>
-                                </tr>
-                              ))}
+                              {(() => {
+                                let listToRender = parsedUploadedTeachers.length > 0 ? parsedUploadedTeachers : globalRoster;
+                                let isGlobal = parsedUploadedTeachers.length === 0;
+                                let needed = dutyRequired ? parseInt(dutyRequired, 10) : 0;
+                                let items = needed > 0 ? listToRender.slice(0, needed) : listToRender;
+                                
+                                return items.map((t, idx) => (
+                                  <tr key={idx}>
+                                    <td style={{ fontWeight: 600, color: 'white' }}>{t.name}</td>
+                                    <td style={{ fontSize: '0.85rem' }}>{t.phone}</td>
+                                    <td style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>{t.email || '—'}</td>
+                                    <td>
+                                      <select
+                                        className="form-control"
+                                        style={{
+                                          padding: '0.25rem 1.75rem 0.25rem 0.5rem',
+                                          height: 'auto',
+                                          minHeight: 'auto',
+                                          fontSize: '0.85rem',
+                                          width: '100%',
+                                          minWidth: '125px',
+                                          boxSizing: 'border-box',
+                                          color: 'var(--text-main)',
+                                          backgroundColor: 'var(--bg-color)',
+                                        }}
+                                        value={isGlobal ? (hallsConfig[idx % hallsConfig.length]?.name || 'Hall 1') : t.assignedHall}
+                                        onChange={(e) => {
+                                          if (!isGlobal) handleTeacherPreviewHallChange(idx, e.target.value)
+                                        }}
+                                        disabled={isGlobal}
+                                      >
+                                        {hallsConfig.map(h => (
+                                          <option
+                                            key={h.name}
+                                            value={h.name}
+                                            style={{
+                                              backgroundColor: 'var(--panel-bg)',
+                                              color: 'var(--text-main)',
+                                            }}
+                                          >
+                                            {h.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </td>
+                                  </tr>
+                                ));
+                              })()}
                             </tbody>
                           </table>
                         </div>
                       </div>
                     )}
-                  </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <button
@@ -1565,6 +1763,7 @@ Delhi Technological University`;
                         backgroundColor: '#FF7377',
                         border: '1px solid #dc2626',
                         color: '#fff',
+                        marginTop: '10px'
                       }}
                     >
                       {isEditMode ? 'Save & Update Drive' : 'Create & Initialize Drive'}
@@ -2001,7 +2200,7 @@ Delhi Technological University`;
                       height: '45px',
                     }}
                   >
-                    Manage Student Emails
+                    Send Student Emails
                   </button>
 
                   <button
@@ -2057,7 +2256,7 @@ Delhi Technological University`;
             </div>
           </section>
         )}
-
+      
       </main>
 
 
